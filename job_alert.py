@@ -1,141 +1,124 @@
-#!/usr/bin/env python3
-"""
-Daily job-search automation using SerpAPI (Google Search API):
- - Searches fresher software developer jobs
- - Collects titles, URLs, snippets
- - Sends HTML email with results
-"""
-
 import os
-import time
-import requests
 import smtplib
-from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
+from serpapi import GoogleSearch
 
+# Load environment variables
 SERPAPI_KEY = os.getenv("SERPAPI_KEY")
-
-EMAIL_SMTP = os.getenv("EMAIL_SMTP", "smtp.gmail.com")
-EMAIL_PORT = int(os.getenv("EMAIL_PORT", 587))
 EMAIL_USER = os.getenv("EMAIL_USER")
 EMAIL_PASS = os.getenv("EMAIL_PASS")
 TO_EMAIL = os.getenv("TO_EMAIL")
 
-COMPANIES = [c.strip() for c in os.getenv(
-    "COMPANIES",
-    "google,amazon,microsoft,meta,tesla,flipkart,ola,uber,tcs,infosys,wipro"
-).split(",")]
+COMPANIES = [c.strip() for c in os.getenv("COMPANIES", "").split(",")]
+SEARCH_KEYWORDS = [k.strip() for k in os.getenv("SEARCH_KEYWORDS", "").split(",")]
 
-SEARCH_KEYWORDS = [k.strip() for k in os.getenv(
-    "SEARCH_KEYWORDS",
-    "software developer fresher,software engineer fresher,graduate software engineer"
-).split(",")]
-
-MAX_RESULTS = 20
+MAX_RESULTS = 50
 
 
-def serpapi_search(query):
-    """Perform Google Search using SerpAPI."""
-    url = "https://serpapi.com/search"
-    params = {
-        "engine": "google",
+# -----------------------------
+# Search SerpAPI Google Jobs (India Only)
+# -----------------------------
+def serpapi_search(company, keyword):
+    """Perform Google Jobs Search using SerpAPI (India only)."""
+    
+    query = f"{company} {keyword} fresher jobs in India"
+    
+    search = GoogleSearch({
+        "engine": "google_jobs",
         "q": query,
-        "api_key": SERPAPI_KEY,
-        "num": "10",
-        "hl": "en"
-    }
-    resp = requests.get(url, params=params)
-    resp.raise_for_status()
-    return resp.json()
+        "hl": "en",
+        "gl": "in",
+        "location": "India",
+        "api_key": SERPAPI_KEY
+    })
+
+    results = search.get_dict()
+    return results.get("jobs_results", [])
 
 
+# -----------------------------
+# Collect jobs
+# -----------------------------
 def collect_results():
-    results = []
-    queries = []
+    all_jobs = []
+    seen_urls = set()
 
     for kw in SEARCH_KEYWORDS:
         for c in COMPANIES:
-            queries.append(f"{kw} {c} jobs")
-        queries.append(f"{kw} fresher jobs 2025")
+            try:
+                jobs = serpapi_search(c, kw)
 
-    seen_urls = set()
+                for job in jobs:
+                    title = job.get("title", "No title")
+                    company = job.get("company_name", "Unknown")
+                    location = job.get("location", "Unknown")
+                    url = job.get("apply_link", None)
 
-    for q in queries:
-        try:
-            data = serpapi_search(q)
-            organic = data.get("organic_results", [])
+                    if url and url not in seen_urls:
+                        seen_urls.add(url)
+                        all_jobs.append({
+                            "title": title,
+                            "company": company,
+                            "location": location,
+                            "url": url
+                        })
 
-            for item in organic:
-                link = item.get("link")
-                title = item.get("title")
-                snippet = item.get("snippet", "")
+            except Exception as e:
+                print(f"Error fetching results for {c} + {kw}: {e}")
 
-                if not link or link in seen_urls:
-                    continue
-
-                results.append({
-                    "title": title,
-                    "url": link,
-                    "snippet": snippet
-                })
-
-                seen_urls.add(link)
-
-                if len(results) >= MAX_RESULTS:
-                    return results
-
-            time.sleep(1)
-
-        except Exception as e:
-            print("Error searching:", e)
-            time.sleep(1)
-
-    return results
+    return all_jobs[:MAX_RESULTS]
 
 
-def send_email(subject, html_body):
-    msg = MIMEMultipart("alternative")
+# -----------------------------
+# Send email
+# -----------------------------
+def send_email(subject, html):
+    msg = MIMEText(html, "html")
     msg["Subject"] = subject
     msg["From"] = EMAIL_USER
     msg["To"] = TO_EMAIL
-    msg.attach(MIMEText(html_body, "html"))
 
-    server = smtplib.SMTP(EMAIL_SMTP, EMAIL_PORT)
-    server.starttls()
-    server.login(EMAIL_USER, EMAIL_PASS)
-    server.sendmail(EMAIL_USER, [TO_EMAIL], msg.as_string())
-    server.quit()
+    try:
+        server = smtplib.SMTP("smtp.gmail.com", 587)
+        server.starttls()
+        server.login(EMAIL_USER, EMAIL_PASS)  # Gmail App Password
+        server.sendmail(EMAIL_USER, TO_EMAIL, msg.as_string())
+        server.quit()
+        print("Email sent successfully!")
+
+    except Exception as e:
+        print(f"Error sending email: {e}")
 
 
-def generate_html(results):
+# -----------------------------
+# Build email HTML
+# -----------------------------
+def build_email(results):
     if not results:
-        return "<p>No job results found today.</p>"
+        return "<h2>No new fresher jobs found today.</h2>"
 
-    html = "<h2>Daily Fresher Job Alerts</h2><ul>"
+    html = "<h2>Daily Job Alerts - India Fresher Developer Roles</h2><br>"
 
     for r in results:
         html += f"""
-        <li>
-            <a href="{r['url']}"><b>{r['title']}</b></a><br>
-            <p>{r['snippet']}</p>
-        </li><hr>
+        <b>{r['title']}</b><br>
+        Company: {r['company']}<br>
+        Location: {r['location']}<br>
+        <a href="{r['url']}">Apply Here</a>
+        <br><br>
         """
 
-    html += "</ul>"
     return html
 
 
-def main():
-    if not SERPAPI_KEY:
-        raise RuntimeError("SERPAPI_KEY missing")
-
-    results = collect_results()
-    html = generate_html(results)
-
-    send_email("Daily Job Alerts – Software Developer Fresher", html)
-
-    print("Email sent successfully with", len(results), "results.")
-
-
+# -----------------------------
+# MAIN
+# -----------------------------
 if __name__ == "__main__":
-    main()
+    print("Collecting India-based developer fresher jobs...")
+    results = collect_results()
+    print(f"Found {len(results)} results.")
+
+    html = build_email(results)
+    send_email("Daily Job Alerts - India Software Developer Fresher", html)
+
