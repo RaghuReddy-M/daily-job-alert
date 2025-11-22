@@ -1,27 +1,19 @@
 #!/usr/bin/env python3
 """
-Daily job-search automation:
- - Uses Bing Web Search API to find fresher software developer jobs
- - Fetches page metadata
- - Sends results as HTML email
+Daily job-search automation using SerpAPI (Google Search API):
+ - Searches fresher software developer jobs
+ - Collects titles, URLs, snippets
+ - Sends HTML email with results
 """
 
 import os
 import time
 import requests
-from bs4 import BeautifulSoup
-from dotenv import load_dotenv
 import smtplib
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
-import json
 
-# Load env (works for local testing)
-load_dotenv()
-
-# Config from environment (GitHub Secrets will supply values)
-BING_API_KEY = os.getenv("BING_API_KEY")
-BING_ENDPOINT = os.getenv("BING_ENDPOINT", "https://api.bing.microsoft.com/v7.0/search")
+SERPAPI_KEY = os.getenv("SERPAPI_KEY")
 
 EMAIL_SMTP = os.getenv("EMAIL_SMTP", "smtp.gmail.com")
 EMAIL_PORT = int(os.getenv("EMAIL_PORT", 587))
@@ -30,116 +22,83 @@ EMAIL_PASS = os.getenv("EMAIL_PASS")
 TO_EMAIL = os.getenv("TO_EMAIL")
 
 COMPANIES = [c.strip() for c in os.getenv(
-    "COMPANIES", 
-    "google,amazon,microsoft,flipkart,ola,uber,meta,tesla,tcs,infosys,wipro"
-).split(",") if c.strip()]
+    "COMPANIES",
+    "google,amazon,microsoft,meta,tesla,flipkart,ola,uber,tcs,infosys,wipro"
+).split(",")]
 
 SEARCH_KEYWORDS = [k.strip() for k in os.getenv(
-    "SEARCH_KEYWORDS", 
+    "SEARCH_KEYWORDS",
     "software developer fresher,software engineer fresher,graduate software engineer"
 ).split(",")]
 
-MAX_RESULTS = int(os.getenv("MAX_RESULTS", "30"))
-
-SEEN_STORE = "seen.json"  # Only works locally, not in GitHub Actions unless stored remotely
+MAX_RESULTS = 20
 
 
-# -------------------------- Core Functions -------------------------- #
-
-def search_bing(query, count=10):
-    headers = {"Ocp-Apim-Subscription-Key": BING_API_KEY}
-    params = {"q": query, "count": count, "mkt": "en-IN"}
-    resp = requests.get(BING_ENDPOINT, headers=headers, params=params, timeout=15)
+def serpapi_search(query):
+    """Perform Google Search using SerpAPI."""
+    url = "https://serpapi.com/search"
+    params = {
+        "engine": "google",
+        "q": query,
+        "api_key": SERPAPI_KEY,
+        "num": "10",
+        "hl": "en"
+    }
+    resp = requests.get(url, params=params)
     resp.raise_for_status()
     return resp.json()
 
 
-def extract_page_metadata(url):
-    """Extract page title + first paragraph snippet."""
-    try:
-        r = requests.get(url, timeout=10, headers={"User-Agent": "job-bot"})
-        r.raise_for_status()
-        soup = BeautifulSoup(r.text, "html5lib")
-
-        title = soup.title.string.strip() if soup.title else ""
-        p = soup.find("p")
-        snippet = p.get_text().strip()[:300] if p else ""
-
-        return {"title": title, "snippet": snippet}
-    except:
-        return {"title": "", "snippet": ""}
-
-
-def build_queries():
+def collect_results():
+    results = []
     queries = []
+
     for kw in SEARCH_KEYWORDS:
         for c in COMPANIES:
-            queries.append(f'{kw} "{c}"')
-            queries.append(f'{kw} site:{c}.com careers')
-        queries.append(kw + " fresher jobs tech companies startup")
-    return list(dict.fromkeys(queries))
+            queries.append(f"{kw} {c} jobs")
+        queries.append(f"{kw} fresher jobs 2025")
 
-
-def collect_results():
-    found = {}
-    queries = build_queries()
+    seen_urls = set()
 
     for q in queries:
         try:
-            data = search_bing(q)
-            items = data.get("webPages", {}).get("value", [])
+            data = serpapi_search(q)
+            organic = data.get("organic_results", [])
 
-            for item in items:
-                url = item.get("url")
-                if not url or url in found:
+            for item in organic:
+                link = item.get("link")
+                title = item.get("title")
+                snippet = item.get("snippet", "")
+
+                if not link or link in seen_urls:
                     continue
 
-                meta = extract_page_metadata(url)
+                results.append({
+                    "title": title,
+                    "url": link,
+                    "snippet": snippet
+                })
 
-                found[url] = {
-                    "title": meta["title"] or item.get("name", "No Title"),
-                    "url": url,
-                    "snippet": meta["snippet"] or item.get("snippet", ""),
-                    "source": item.get("displayUrl", "")
-                }
+                seen_urls.add(link)
 
-                if len(found) >= MAX_RESULTS:
-                    return list(found.values())
+                if len(results) >= MAX_RESULTS:
+                    return results
 
             time.sleep(1)
 
         except Exception as e:
-            print("Error:", e)
+            print("Error searching:", e)
             time.sleep(1)
 
-    return list(found.values())
+    return results
 
 
-def generate_html(results):
-    if not results:
-        return "<p>No new results today.</p>"
-
-    html = "<h2>Daily Job Search — Fresher Developer Roles</h2><ul>"
-
-    for r in results:
-        html += f"""
-        <li>
-            <a href="{r['url']}"><b>{r['title']}</b></a><br>
-            <small>{r['source']}</small><br>
-            <p>{r['snippet']}</p>
-        </li><hr>
-        """
-
-    html += "</ul>"
-    return html
-
-
-def send_email(subject, body_html):
+def send_email(subject, html_body):
     msg = MIMEMultipart("alternative")
     msg["Subject"] = subject
     msg["From"] = EMAIL_USER
     msg["To"] = TO_EMAIL
-    msg.attach(MIMEText(body_html, "html"))
+    msg.attach(MIMEText(html_body, "html"))
 
     server = smtplib.SMTP(EMAIL_SMTP, EMAIL_PORT)
     server.starttls()
@@ -148,15 +107,34 @@ def send_email(subject, body_html):
     server.quit()
 
 
+def generate_html(results):
+    if not results:
+        return "<p>No job results found today.</p>"
+
+    html = "<h2>Daily Fresher Job Alerts</h2><ul>"
+
+    for r in results:
+        html += f"""
+        <li>
+            <a href="{r['url']}"><b>{r['title']}</b></a><br>
+            <p>{r['snippet']}</p>
+        </li><hr>
+        """
+
+    html += "</ul>"
+    return html
+
+
 def main():
-    if not BING_API_KEY:
-        raise Exception("Missing BING_API_KEY")
+    if not SERPAPI_KEY:
+        raise RuntimeError("SERPAPI_KEY missing")
 
     results = collect_results()
     html = generate_html(results)
-    send_email("Daily Job Alerts — Fresher Developer Roles", html)
 
-    print("Email sent with", len(results), "results.")
+    send_email("Daily Job Alerts – Software Developer Fresher", html)
+
+    print("Email sent successfully with", len(results), "results.")
 
 
 if __name__ == "__main__":
