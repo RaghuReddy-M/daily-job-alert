@@ -1,4 +1,4 @@
 requests
-python-dotenv
+google-search-results
 beautifulsoup4
 html5lib
